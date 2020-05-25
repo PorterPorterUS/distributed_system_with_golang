@@ -207,11 +207,10 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
 
 	// Your code here.
 
-	return ret
+	return m.end
 }
 
 //
@@ -224,13 +223,6 @@ func (m *Master) Done() bool {
 // main/mrmaster.go calls Done() periodically to find out
 // if the entire job has finished.
 //
-func (m *Master) Done() bool {
-	//ret := false
-	return m.end
-	// Your code here.
-
-	//return ret
-}
 
 //
 // create a Master.

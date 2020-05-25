@@ -73,23 +73,6 @@ func Worker(mapf func(string, string) []KeyValue,
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
-
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
-}
 
 //
 // send an RPC request to the master, wait for the response.
@@ -212,4 +195,15 @@ func ReduceTask(reducef func(string, []string) string, task Task) {
 		outputFile.WriteString(fmt.Sprintf("%v %v\n", key, value))
 	}
 
+}
+
+func intermediateFilename(i int, j int, n int) string {
+	return "mr-inter-" + strconv.Itoa(i*n+j)
+}
+
+func GetTask() GetTaskReply {
+	args := ExampleArgs{}
+	reply := GetTaskReply{}
+	call("Master.GetTask", &args, &reply)
+	return reply
 }
