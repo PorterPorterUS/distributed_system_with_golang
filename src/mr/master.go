@@ -55,8 +55,78 @@ type Task struct {
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (m *Master) GetTask(_ *ExampleArgs, reply *GetTaskReply) error {
+	switch m.masterState {
+	case newMaster:
+		for i, task := range m.mapTask {
+			if task.State == initialState {
+				reply.Task.Type_ = task.Type_
+				reply.Task.Filename = task.Filename
+				reply.Task.Id = task.Id
+				reply.Task.NReduce = task.NReduce
+				reply.Flag = 0
+				reply.Task.State = task.State
+
+				m.mapTask[i].State = inProgress
+				m.mapTask[i].Time = time.Now()
+				//reply.Task.State=m.mapTask[i].State
+
+				return nil
+			} else if task.State == inProgress && time.Now().Sub(m.mapTask[i].Time) > time.Duration(5)*time.Second {
+				reply.Task.Type_ = task.Type_
+				reply.Task.Filename = task.Filename
+				reply.Task.Id = task.Id
+				reply.Task.NReduce = task.NReduce
+				reply.Task.State = task.State
+				reply.Flag = 0
+
+				m.mapTask[i].State = inProgress
+				m.mapTask[i].Time = time.Now()
+				//reply.Task.State=m.mapTask[i].State
+
+				return nil
+			}
+		}
+		reply.Flag = 1 // map not finished but in progress
+	case completeMap:
+		for i, task := range m.reduceTask {
+			if task.State == initialState {
+				reply.Task.Type_ = task.Type_
+				reply.Task.Filename = task.Filename
+				reply.Task.Id = task.Id
+				reply.Task.NReduce = task.NReduce
+				reply.Flag = 0
+				reply.Task.Files = task.Files
+				reply.Task.State = task.State
+
+				m.reduceTask[i].State = inProgress
+				m.reduceTask[i].Time = time.Now()
+				//reply.Task.State=m.mapTask[i].State
+
+				return nil
+			} else if task.State == inProgress && time.Now().Sub(m.reduceTask[i].Time) > time.Duration(5)*time.Second {
+				reply.Task.Type_ = task.Type_
+				reply.Task.Filename = task.Filename
+				reply.Task.Id = task.Id
+				reply.Task.NReduce = task.NReduce
+				reply.Flag = 0
+				reply.Task.Files = task.Files
+				reply.Task.State = task.State
+
+				m.reduceTask[i].State = inProgress
+				m.reduceTask[i].Time = time.Now()
+				//reply.Task.State=m.mapTask[i].State
+
+				return nil
+
+			}
+		}
+		reply.Flag = 1 // reduce not finished but in progress
+	case completeReduce:
+		reply.Flag = 2 // all task have been finished
+
+	}
+
 	return nil
 }
 
