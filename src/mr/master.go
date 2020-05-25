@@ -130,6 +130,62 @@ func (m *Master) GetTask(_ *ExampleArgs, reply *GetTaskReply) error {
 	return nil
 }
 
+func (m *Master) TaskCompare(args *TaskCompareArgs, reply *ExampleReply) error {
+	if args.Type == mapTask {
+		for i, task := range m.mapTask {
+			if task.Id == args.ID {
+				m.mapTask[i].State = complete
+			}
+		}
+	} else {
+		for i, task := range m.reduceTask {
+			if task.Id == args.ID {
+				m.reduceTask[i].State = complete
+			}
+		}
+	}
+	m.checkTasksComplete()
+	return nil
+}
+
+func (m *Master) checkTasksComplete() {
+	switch m.masterState {
+	case newMaster:
+		for _, j := range m.mapTask {
+			if j.State != complete {
+				return
+			}
+		}
+		m.masterState = completeMap
+		//start creating reduce task
+		for i := 0; i < m.nReduce; i++ {
+			m.reduceTask = append(m.reduceTask, Task{
+				Type_:    reduceTask,
+				Id:       i,
+				Filename: "",
+				State:    initialState,
+				NReduce:  m.nReduce,
+				Files:    len(m.mapTask),
+			})
+
+		}
+	case completeMap:
+		for _, j := range m.reduceTask {
+			if j.State != complete {
+				return
+			}
+		}
+		m.masterState = completeReduce
+		m.end = true
+	case completeReduce:
+		m.end = true
+
+	default:
+
+	}
+
+}
+
 //
 // start a thread that listens for RPCs from worker.go
 //
