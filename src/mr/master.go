@@ -1,15 +1,51 @@
 package mr
 
-import "log"
+import (
+	"log"
+	"time"
+)
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
 
+const (
+	mapTask    = 1
+	reduceTask = 2
+)
+
+//state for task
+const (
+	initialState = 0
+	inProgress   = 1
+	complete     = 2
+)
+
+//state for master
+const (
+	newMaster = iota
+	completeMap
+	completeReduce
+)
 
 type Master struct {
 	// Your definitions here.
+	nReduce          int
+	masterState      int
+	mapTask          []Task
+	reduceTask       []Task
+	intermediateFile map[int][]string
+	end              bool
+}
 
+type Task struct {
+	Type_    int
+	Id       int
+	Filename string
+	State    int
+	NReduce  int
+	Files    int
+	Time     time.Time
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -23,7 +59,6 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,7 +85,6 @@ func (m *Master) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
@@ -63,7 +97,6 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{}
 
 	// Your code here.
-
 
 	m.server()
 	return &m
