@@ -1,10 +1,23 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"syscall"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
 
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +37,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -32,10 +44,27 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the master.
-	// CallExample()
-
+	for {
+		task := GetTask()
+		switch task.Flag {
+		case 1:
+			time.Sleep(time.Second)
+			continue
+		case 2:
+			return
+		}
+		switch task.Task.Type_ {
+		case mapTask:
+			MapTask(mapf, task.Task)
+			TaskCompare(task.Task.Type_, task.Task.Id)
+		case reduceTask:
+			ReduceTask(reducef, task.Task)
+			TaskCompare(task.Task.Type_, task.Task.Id)
+		default:
+			panic("worker panic")
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 //
@@ -82,4 +111,49 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func MapTask(mapf func(string, string) []KeyValue, task Task) {
+	file, err := os.Open(task.Filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", task.Filename)
+		return
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", task.Filename)
+		return
+	}
+	file.Close()
+	kva := mapf(task.Filename, string(content))
+
+	fileCount := task.NReduce
+	files := make(map[int]*os.File, fileCount)
+	encoders := make([]*json.Encoder, fileCount)
+
+	for i := 0; i < fileCount; i++ {
+		finalName := intermediateFilename(task.Id, i, task.NReduce)
+		intermediateFile, err := os.Create(finalName)
+		if err != nil {
+			panic("Create file error : " + task.Filename)
+		}
+		defer intermediateFile.Close()
+		files[i] = intermediateFile
+		e := syscall.Flock(int(intermediateFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if e != nil {
+			return
+		}
+		defer syscall.Flock(int(intermediateFile.Fd()), syscall.LOCK_UN)
+		encoders[i] = json.NewEncoder(intermediateFile)
+	}
+
+	//for i := range kva {
+	//	reduceNum := ihash(kva[i].Key) % fileCount
+	//	fmt.Fprintf(files[reduceNum], "%v %v\n", kva[i].Key, kva[i].Value)
+	//}
+	for i := range kva {
+		reduceNum := ihash(kva[i].Key) % fileCount
+		encoders[reduceNum].Encode(kva[i])
+	}
+
 }
