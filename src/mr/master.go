@@ -219,11 +219,44 @@ func (m *Master) Done() bool {
 // main/mrmaster.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //
+
+//
+// main/mrmaster.go calls Done() periodically to find out
+// if the entire job has finished.
+//
+func (m *Master) Done() bool {
+	//ret := false
+	return m.end
+	// Your code here.
+
+	//return ret
+}
+
+//
+// create a Master.
+// main/mrmaster.go calls this function.
+// nReduce is the number of reduce tasks to use.
+//
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{
+		nReduce:     nReduce,
+		mapTask:     []Task{},
+		masterState: newMaster,
+		end:         false,
+	}
 
 	// Your code here.
 
-	m.server()
+	for i, file := range files {
+		m.mapTask = append(m.mapTask, Task{
+			Type_:    mapTask,
+			Id:       i,
+			Filename: file,
+			State:    initialState,
+			NReduce:  m.nReduce,
+		})
+	}
+
+	go m.server()
 	return &m
 }
