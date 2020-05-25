@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -154,6 +155,61 @@ func MapTask(mapf func(string, string) []KeyValue, task Task) {
 	for i := range kva {
 		reduceNum := ihash(kva[i].Key) % fileCount
 		encoders[reduceNum].Encode(kva[i])
+	}
+
+}
+
+func TaskCompare(type_ int, id int) {
+	//taskCompareArgs:=TaskCompareArgs{ID: id,Type: type_}
+	//reply:=Reply{}
+	//call("Master.TaskCompare", &taskCompareArgs, &reply)
+
+	args := TaskCompareArgs{
+		Type: type_,
+		ID:   id,
+	}
+	reply := ExampleReply{}
+	call("Master.TaskCompare", &args, &reply)
+}
+func ReduceTask(reducef func(string, []string) string, task Task) {
+	outputFilename := "mr-out-reduce-" + strconv.Itoa(task.Id) + ".txt"
+	outputFile, err := os.Create(outputFilename)
+	if err != nil {
+		panic("Create file error : " + outputFilename)
+	}
+	defer outputFile.Close()
+	e := syscall.Flock(int(outputFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if e != nil {
+		return
+	}
+	defer syscall.Flock(int(outputFile.Fd()), syscall.LOCK_UN)
+
+	data := make(map[string][]string)
+	m := task.Files
+	files := make(map[int]*os.File, m)
+	for i := 0; i < m; i++ {
+		finalName := intermediateFilename(i, task.Id, task.NReduce)
+		file, err := os.Open(finalName)
+		if err != nil {
+			log.Fatalf("cannot open %v", finalName)
+			return
+		}
+		defer file.Close()
+		files[i] = file
+		// 处理中间文件数据
+		decoder := json.NewDecoder(file)
+		for {
+			kv := new(KeyValue)
+			err = decoder.Decode(kv)
+			if err != nil {
+				break
+			}
+			data[kv.Key] = append(data[kv.Key], kv.Value)
+		}
+	}
+	for key := range data {
+		value := reducef(key, data[key])
+		outputFile.WriteString(fmt.Sprintf("%v %v\n", key, value))
 	}
 
 }
