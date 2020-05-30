@@ -18,12 +18,14 @@ package raft
 //
 
 import (
+	"bytes"
 	"math/rand"
 	"sync"
 	"time"
 )
 import "sync/atomic"
 import "../labrpc"
+import "../labgob"
 
 // import "bytes"
 // import "../labgob"
@@ -104,6 +106,17 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	rf.persister.SaveRaftState(rf.encodeRaftState())
+
+}
+
+func (rf *Raft) encodeRaftState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	return w.Bytes()
+
 }
 
 //
@@ -134,6 +147,9 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	//2A
+	Term        int
+	CandidateId int
 }
 
 //
@@ -142,6 +158,17 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
+}
+
+type AppendEntriesArgs struct {
+	Term     int // 2A
+	LeaderId int // 2A
+}
+type AppendEntriesReply struct {
+	Term    int  // 2A
+	Success bool // 2A
 }
 
 //
@@ -149,6 +176,32 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	//2A
+	//rf is the one receive vote request and args is the one who send vote request
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist() // execute before rf.mu.Unlock()
+
+	if args.Term < rf.currentTerm ||
+		(args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId) {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		//reply.VoteGranted=true
+		reply.Term = args.Term
+		rf.convertTo(Follower)
+	}
+
+	rf.votedFor = args.CandidateId
+	reply.VoteGranted = true
+
+	reply.Term = rf.currentTerm
+
+	rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+
 }
 
 //
@@ -182,6 +235,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -256,7 +314,33 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower //all servers starting with follower
 
 	// initialize from state persisted before a crash
+	rf.mu.Lock()
 	rf.readPersist(persister.ReadRaftState())
+	rf.mu.Unlock()
+
+	//Starting raft algorithm- leader election
+	go func(node *Raft) { //passby a raft pointer
+		for {
+			select {
+			case <-rf.electionTimer.C:
+				rf.mu.Lock()
+				if rf.state == Follower {
+					rf.convertTo(Candidate)
+				} else {
+					rf.startElection()
+				}
+				rf.mu.Unlock()
+			case <-rf.heartbeatTimer.C:
+				rf.mu.Lock()
+				if rf.state == Leader {
+					rf.broadcastHeartbeat()
+					rf.heartbeatTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+				}
+				rf.mu.Unlock()
+			}
+		}
+
+	}(rf)
 
 	return rf
 }
@@ -264,4 +348,128 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func randTimeDuration(lower, upper time.Duration) time.Duration {
 	num := rand.Int63n(upper.Nanoseconds()-lower.Nanoseconds()) + lower.Nanoseconds()
 	return time.Duration(num) * time.Nanosecond
+}
+
+func (rf *Raft) convertTo(s Nodestate) {
+	if rf.state == s {
+		return
+	}
+	DPrintf("Term %d: server %d convert from %v to %v\n",
+		rf.currentTerm, rf.me, rf.state, s)
+	rf.state = s
+	switch s {
+	case Follower:
+		rf.heartbeatTimer.Stop()
+		rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+		rf.votedFor = -1
+	case Candidate:
+		rf.startElection()
+	case Leader:
+		rf.electionTimer.Stop()
+		rf.broadcastHeartbeat()
+		rf.heartbeatTimer.Reset(HeartbeatInterval)
+
+	}
+
+}
+
+func (rf *Raft) startElection() {
+	defer rf.persist()
+	rf.currentTerm = rf.currentTerm + 1
+	rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+
+	args := RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+	}
+	var voteCount int32
+	for i := range rf.peers {
+		if i == rf.me {
+			rf.votedFor = rf.me
+			atomic.AddInt32(&voteCount, 1)
+			continue
+		}
+		go func(server int) {
+			var reply RequestVoteReply
+			if rf.sendRequestVote(server, &args, &reply) {
+				rf.mu.Lock()
+				DPrintf("%v got RequestVote response from node %d, VoteGranted=%v, Term=%d",
+					rf, server, reply.VoteGranted, reply.Term)
+				if reply.VoteGranted && rf.state == Candidate {
+					atomic.AddInt32(&voteCount, 1)
+					if atomic.LoadInt32(&voteCount) > int32(len(rf.peers)/2) {
+						rf.convertTo(Leader)
+					}
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.convertTo(Follower)
+						rf.persist()
+					}
+				}
+				rf.mu.Unlock()
+			}
+
+		}(i)
+	}
+
+}
+
+func (rf *Raft) broadcastHeartbeat() {
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(server int) {
+			rf.mu.Lock()
+			if rf.state != Leader {
+				rf.mu.Unlock()
+				return
+			}
+
+			args := AppendEntriesArgs{
+				Term:     rf.currentTerm,
+				LeaderId: rf.me,
+			}
+			rf.mu.Unlock()
+			var reply AppendEntriesReply
+			if rf.sendAppendEntries(server, &args, &reply) {
+				rf.mu.Lock()
+				if rf.state != Leader {
+					rf.mu.Unlock()
+					return
+				}
+				if reply.Success {
+
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.convertTo(Follower)
+						rf.persist()
+					}
+
+				}
+				rf.mu.Unlock()
+
+			}
+
+		}(i)
+	}
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.convertTo(Follower)
+	}
+	rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+	reply.Success = true
 }
