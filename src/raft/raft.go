@@ -60,6 +60,11 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type LogEntry struct {
+	Term    int
+	Command interface{}
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -80,6 +85,14 @@ type Raft struct {
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
 	state          Nodestate
+
+	//2B
+	log         []LogEntry
+	commitIndex int   //（半数通过了的命令
+	lastApplied int   //(最终运用到状态机当中的命令)
+	nextIndex   []int //下一个待发送日志的下标，初始化值是 新leader的last Log Index +1
+	matchIndex  []int //日志最匹配的一个下标，初始化值是0
+
 }
 
 // return currentTerm and whether this server
@@ -174,11 +187,22 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
+
+	//2B
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 type AppendEntriesArgs struct {
 	Term     int // 2A
 	LeaderId int // 2A
+
+	//2B
+	PrevLogIndex int        //日志最匹配的一个下标，初始化值是0
+	PrevLogTerm  int        // 该位置上的 entry 的 Term 属性
+	Entries      []LogEntry // leader 的 log[PrevLogIndex+1 : ]
+	LeaderCommit int        //// 将 leader 的 commitIndex 通知各个 follower ++follower 将据此更新自身的 commitIndex
+
 }
 type AppendEntriesReply struct {
 	Term    int  // 2A
