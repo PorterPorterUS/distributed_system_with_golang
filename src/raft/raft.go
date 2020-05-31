@@ -92,7 +92,7 @@ type Raft struct {
 	lastApplied int   //(最终运用到状态机当中的命令)
 	nextIndex   []int //下一个待发送日志的下标，初始化值是 新leader的last Log Index +1
 	matchIndex  []int //日志最匹配的一个下标，初始化值是0
-
+	applych     chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -345,16 +345,27 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	//2A
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.heartbeatTimer = time.NewTimer(HeartbeatInterval)
 	rf.electionTimer = time.NewTimer(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
 	rf.state = Follower //all servers starting with follower
+	//2B
+	rf.applych = applyCh
+	rf.log = make([]LogEntry, 1)
 
 	// initialize from state persisted before a crash
 	rf.mu.Lock()
 	rf.readPersist(persister.ReadRaftState())
 	rf.mu.Unlock()
+
+	//2B
+	rf.nextIndex = make([]int, len(rf.peers))  //one nextIndex for each server
+	rf.matchIndex = make([]int, len(rf.peers)) //one matchIndex for each server
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = len(rf.log) // initialize each nextIndex to be the len of log in the server
+	}
 
 	//Starting raft algorithm- leader election
 	go func(node *Raft) { //passby a raft pointer
@@ -372,7 +383,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.mu.Lock()
 				if rf.state == Leader {
 					rf.broadcastHeartbeat()
-					rf.heartbeatTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+					//rf.heartbeatTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+					rf.heartbeatTimer.Reset(HeartbeatInterval)
 				}
 				rf.mu.Unlock()
 			}
