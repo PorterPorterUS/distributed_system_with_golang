@@ -223,6 +223,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	defer rf.persist() // execute before rf.mu.Unlock()
 
+	// if receiver has more up-to-date term
+	//or has the same term but vote for someone else
+	//then return false
 	if args.Term < rf.currentTerm ||
 		(args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId) {
 		reply.VoteGranted = false
@@ -230,10 +233,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
+	//if candidate has more up-to-date ,then receiver become follower
 	if args.Term > rf.currentTerm {
 		//reply.VoteGranted=true
 		reply.Term = args.Term
 		rf.convertTo(Follower)
+	}
+
+	//2B:election restriction
+	//candidate and voter have same term or candidate have more up-to-date term
+	//but we need to reject the candidate with outdated term compared with voter
+	//A.more up-to-date: the last log entry term is larger
+	//B.more up-to-date: same last log entry term but longer log
+	lastLogIndex := len(rf.log) - 1
+	if args.LastLogTerm < rf.log[lastLogIndex].Term ||
+		(args.LastLogTerm == rf.log[lastLogIndex].Term && args.LastLogIndex < lastLogIndex) {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
 	}
 
 	rf.votedFor = args.CandidateId
@@ -438,6 +455,11 @@ func (rf *Raft) convertTo(s Nodestate) {
 		rf.heartbeatTimer.Reset(HeartbeatInterval)
 
 	}
+
+}
+
+func (rf *Raft) setCommitIndex(commitIndex int) {
+	rf.commitIndex = commitIndex
 
 }
 
