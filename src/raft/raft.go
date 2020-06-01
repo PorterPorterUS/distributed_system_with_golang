@@ -177,6 +177,9 @@ type RequestVoteArgs struct {
 	//2A
 	Term        int
 	CandidateId int
+	//2B
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -301,7 +304,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
+	//由于Start()的功能是将接收到的客户端命令追加到自己的本地log，
+	//然后给其他所有peers并行发送AppendEntries RPC来迫使其他peer也同意领导者日志的内容，
+	//在收到大多数peers的已追加该命令到log的肯定回复后，
+	//若该entry的任期等于leader的当前任期，
+	//则leader将该entry标记为已提交的(committed)，
+	//提升(adavance)commitIndex到该entry所在的index，
+	//并发送ApplyMsg消息到ApplyCh，相当于应用该entry的命令到状态机。
+	term, isLeader = rf.GetState()
+	if isLeader {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.log = append(rf.log, LogEntry{Command: command, Term: term})
+		rf.matchIndex[rf.me] = len(rf.log)
+		rf.nextIndex[rf.me] = len(rf.log) + 1
+		rf.persist()
+	}
 	return index, term, isLeader
 }
 
@@ -428,9 +446,13 @@ func (rf *Raft) startElection() {
 	rf.currentTerm = rf.currentTerm + 1
 	rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
 
+	lastLogIndex := len(rf.log) - 1
 	args := RequestVoteArgs{
 		Term:        rf.currentTerm,
 		CandidateId: rf.me,
+		//2B
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  rf.log[lastLogIndex].Term,
 	}
 	var voteCount int32
 	for i := range rf.peers {
