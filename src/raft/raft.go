@@ -52,15 +52,27 @@ func (rf *Raft) convertTo(s Nodestate) {
 		rf.currentTerm, rf.me, rf.state, s)
 	rf.state = s
 	switch s {
+
+	//follower->candidate->leader
+	//candidate->follower
+	//leader->follower
 	case Follower:
+		//转为follower之后，
+		//reset election  timer(从candidate转来)
+		//停止发送心跳(从leader转来)
 		rf.heartbeatTimer.Stop()
 		rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
 		rf.votedFor = -1
 
 	case Candidate:
+		//转为follower之后，reset election  timer(只可能是通过follower转来)
 		rf.startElection()
 
 	case Leader:
+		//stop election timer
+		//start heartbeat broadcast
+		//initialize matchIndex to be 0
+		//initialize nextIndex to be len of rf.log
 		for i := range rf.nextIndex {
 			// initialized to leader last log index + 1
 			rf.nextIndex[i] = len(rf.log)
@@ -112,18 +124,18 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	//2A
-	currentTerm    int
-	votedFor       int
+	currentTerm    int //persistence on all servers
+	votedFor       int //persistence on all servers
 	electionTimer  *time.Timer
 	heartbeatTimer *time.Timer
 	state          Nodestate
 
 	//2B
-	log         []LogEntry
-	commitIndex int   //（半数通过了的命令
-	lastApplied int   //(最终运用到状态机当中的命令)
-	nextIndex   []int //下一个待发送日志的下标，初始化值是 新leader的last Log Index +1
-	matchIndex  []int //日志最匹配的一个下标，初始化值是0
+	log         []LogEntry //persistence on all servers
+	commitIndex int        //all servers(non-persistence):最大的已经被提交的日志索引,initial to 0
+	lastApplied int        //all servers(non-persistence):最后被应用到状态的日志条目索引,initial to 0
+	nextIndex   []int      //领导人维护(non-persistence): 对于每一个服务器，需要发送给他的下一个日志条目的索引值，初始化为当前领导人的最后的日志索引值加1
+	matchIndex  []int      //领导人维护(non-persistence):对于每一个服务器，已经复制给他的日志的最高索引值,initial to 0
 	applych     chan ApplyMsg
 }
 
@@ -246,8 +258,9 @@ type RequestVoteArgs struct {
 	Term        int
 	CandidateId int
 	//2B
-	LastLogIndex int
-	LastLogTerm  int
+	//these two for election restriction
+	LastLogIndex int //index of candidate’s last log entry
+	LastLogTerm  int //term of candidate’s last log entry
 }
 
 //
@@ -258,10 +271,6 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
-
-	//2B
-	//LastLogIndex int
-	//LastLogTerm  int
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -313,15 +322,14 @@ type AppendEntriesArgs struct {
 	LeaderId int // 2A
 
 	//2B
-	PrevLogIndex int        //日志最匹配的一个下标，初始化值是0
-	PrevLogTerm  int        // 该位置上的 entry 的 Term 属性
-	Entries      []LogEntry // leader 的 log[PrevLogIndex+1 : ]
-	LeaderCommit int        //// 将 leader 的 commitIndex 通知各个 follower ++follower 将据此更新自身的 commitIndex
-
+	PrevLogIndex int        //当前要附加的日志entries的上一条的日志索引
+	PrevLogTerm  int        // 当前要附加的日志entries的上一条的日志任期号
+	Entries      []LogEntry // 需要附加的日志条目（心跳时为空）
+	LeaderCommit int        //// 当前领导人已经提交的最大的日志索引值
 }
 type AppendEntriesReply struct {
-	Term    int  // 2A
-	Success bool // 2A
+	Term    int  // 2A  跟随者的当前的任务号
+	Success bool // 2A  跟随者是否接收了当前的日志，在preLogIndex和preLogTerm匹配的情况下为true，否则返回false
 
 	ConflictTerm  int //2B
 	ConflictIndex int //2B
@@ -332,38 +340,44 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
+	//跟随者接收日志
+	//跟随者收到附加日志的请求，不能简单的将日志追加到自己的日志后面，
+	//因为跟随者的日志可能和领导人有冲突，或者跟随者缺失更多的日志
+	//那么一定要确保本次附加日志的之前的所有日志都相同，也就是说附加当前的日志之前，
+	//缺日志就要把缺失的日志补上，日志冲突了，就要把冲突的日志覆盖
 
-	//1.starting check the term:
-	// if args.term is more up-to-date, then convert myself to follower,and current term to be args.term
-	// if my term is more up-to-date, then refuse the RPC and set reply.term to be my term
+	//1.判断附加日志任期Term和当前的Term是否相同：
+	//1.A 如果请求的Term小于当前的Term，那么说明收到了来自过期的领导人的附加日志请求，那么拒接处理。
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
 	}
+	//1.B 如果请求的Term大于当前的Term，那么更新当前的Term为请求的Term,并且转为follower。
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.convertTo(Follower)
 	}
+	// 收到选举的请求，要立即reset election timer
 	rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
 
-	//2. Starting check with prevlogIndex
-	//2.A if followers' log length is less than leaders' prevloglength, then reply false
-	//2.B if followers' log length is larger or equal to leaders' prevloglength,
-	//but their terms(PrevlogTerm not the currentTerm) are not matched, then refuse the RPC
-	// 2.C if their terms matched ,then execute next step
+	//2.判断preLogIndex是否大于当前的日志长度
+	//或者
+	//preLogIndex位置处的任期是否和preLogTerm相等以检测要附加的日志之前的日志是否匹配
 	currentLogLenth := len(rf.log)
+	// 如果日志的长度没有PreLogIndex指定的长度长
+	// 或者
+	//在PreLogIndex位置处的日志任期不匹配
 	if args.PrevLogIndex > currentLogLenth-1 ||
 		(args.PrevLogIndex <= currentLogLenth-1 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		reply.Success = false
 		reply.Term = rf.currentTerm
-		//2.A if followers' log length is less than leaders' prevloglength,conflict index should be currentLoglength
+		// 如果preLogIndex的长度大于当前的日志的长度，那么说明跟随者缺失日志，那么拒绝附加日志，返回false
 		if args.PrevLogIndex > currentLogLenth-1 {
 			reply.ConflictIndex = currentLogLenth
 			reply.ConflictTerm = -1
 		} else {
-			//2.B if followers' log length is less than leaders' prevloglength,
-			//then conflict term should be the one at the prevloglength index
+			//如果preLogIndex处的任期和preLogTerm不相等，那么说明日志有冲突，拒绝附加日志，返回false
 			reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
 			//then we need to find the first entries inside this conflict term,
 			//then set the conflict index to be the first one +1
@@ -376,12 +390,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	}
 
-	//3. finish prelogIndex and term matching ,then next step is to append logs
+	//3. // PreLog的已经完全匹配，开始追加日志
 	reply.Success = true
-	//starting appending log from the one after the prevlogIndex
+	//从PrevLogIndex+1的位置开始追加日志
 	appendStartIndex := args.PrevLogIndex + 1
+	//args.Entries starts from PrevlogIndex+1
 	for _, logEntry := range args.Entries {
-		//check whether there are logs after the appendStartIndex
+		// 检测对应的append位置是否有日志已经存在
+		//如果已经存在的日志条目和新的产生冲突（索引值相同但是任期号不同），删除这一条和之后所有的
 		if len(rf.log)-1 >= appendStartIndex {
 			//we need to trim the following logs in followers at the index of appendStartIndex
 			//if their logs are not matched
@@ -390,15 +406,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.log = rf.log[:appendStartIndex]
 				rf.log = append(rf.log, LogEntry{Term: logEntry.Term, Command: logEntry.Command})
 			}
-
+			// 日志已经存在了，什么都不做
 		} else {
+			//对应的append位置如果没有日志存在，直接append即可
 			rf.log = append(rf.log, LogEntry{Term: logEntry.Term, Command: logEntry.Command})
-
 		}
 		appendStartIndex++
 	}
 
 	//4.finishing appending, then we need to update commitIndex
+	//rf.commitIndex=Min(args.LeaderCommit, lastLogIndex)
 	lastLogIndex := len(rf.log) - 1
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit > lastLogIndex {
@@ -449,12 +466,16 @@ func (rf *Raft) broadcastHeartbeat() {
 			if rf.sendAppendEntries(server, &args, &reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
+
+				//领导人收到收到跟随者附加日志的响应该如何处理？
+				//比对响应的Term和当前的Term以确认自己是否过期：
+				//如果响应的Term大于当前的Term，那么说明当前的领导人已经过期，马上将自己切换为跟随者
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.convertTo(Follower)
 					rf.persist()
 				}
-
+				//如果响应的Term小于当前的Term，那么说明当前的收到了过期的响应（可能网路延迟导致），那么忽略
 				// 忽略过期任期的响应
 				if currentTerm != rf.currentTerm {
 					return
@@ -465,10 +486,20 @@ func (rf *Raft) broadcastHeartbeat() {
 				if prevLogIndex != rf.nextIndex[server]-1 {
 					return
 				}
+				//判断响应的success是否为真：
+				//如果为假：那么说明附加日志失败，preLogIndex和preLogTerm和跟随者的日志不匹配，
+				//进行步骤5:日志不匹配，那么需要找到下一个和跟随者匹配的日志索引，
+				//简单一点可以通过递减nextIndex[peer]来实现。
 				if !reply.Success {
+					// 第一种情况follower的日志长度短于PrevLogIndex,那么nextIndex = len(follower的日志长短)
 					if reply.ConflictTerm == -1 {
 						rf.nextIndex[server] = reply.ConflictIndex
 					} else {
+						//第二种情况是 长度没有问题
+						//但是在prevLogIndex位置的term不一样
+						//所以在leader中从prevLogIndex往后找
+						//unitl找到和conflict term一样term的index 作为 nextIndex
+						//假如找不到，nextIndex 作为follower中的conflict term中的第一条的index
 						i := prevLogIndex - 1
 						for ; i >= 0 && rf.log[i].Term != reply.ConflictTerm; i-- {
 						}
@@ -479,6 +510,7 @@ func (rf *Raft) broadcastHeartbeat() {
 						}
 					}
 				} else {
+					//响应的success为真,
 					// PreLog匹配，发送nextIndex开始对应的日志
 					rf.matchIndex[server] = prevLogIndex + len(entries)
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
@@ -488,13 +520,15 @@ func (rf *Raft) broadcastHeartbeat() {
 				// 开始检查从commitIndex之后开始的matchIndex, 检查是否可以提交
 				nextCommitIndex := rf.commitIndex
 				//for i := rf.CommitIndex + 1; i <= len(rf.Logs); i++ {
+				//从len-1到commitIndex,查找leader上的每一条logEntry,
+				//去判断有多少个server的matchIndex大于这条LogEntry的index,
+				//假如数量超过n/2+1，那么认为这条logEntry已经被提交了
 				for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
 					committedPeerCount := 1 // 包括自己
 					for key, value := range rf.matchIndex {
 						if key == rf.me {
 							continue
 						}
-
 						if value >= i {
 							// 说明服务器已经提交
 							committedPeerCount++
