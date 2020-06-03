@@ -274,6 +274,8 @@ type RequestVoteReply struct {
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	//被动技能 作为receiver接收sender的请求
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist() // execute before rf.mu.Unlock()
@@ -573,15 +575,21 @@ func (rf *Raft) startElection() {
 		go func(server int) {
 			var reply RequestVoteReply
 			if rf.sendRequestVote(server, &args, &reply) {
+				//所有的接受消息处理例程都要考虑到 network delay，也就是说收到的消息是过时的，这个要正确处理
 				rf.mu.Lock()
 				DPrintf("%v got RequestVote response from node %d, VoteGranted=%v, Term=%d",
 					rf, server, reply.VoteGranted, reply.Term)
 				if reply.VoteGranted && rf.state == Candidate {
+					//candidate 处理 vote reply：当这个消息 delay 时，自己已经可能不是candidate了
+					//check whether it is still a candidate
 					atomic.AddInt32(&voteCount, 1)
 					if atomic.LoadInt32(&voteCount) > int32(len(rf.peers)/2) {
 						rf.convertTo(Leader)
 					}
 				} else {
+					//if the rejection reason is not due to voting for someone else,
+					//but the term is outdated,
+					//then transfer to follower
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.convertTo(Follower)
