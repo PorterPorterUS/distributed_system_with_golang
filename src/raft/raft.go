@@ -683,6 +683,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = index
 		rf.nextIndex[rf.me] = index + 1
 		rf.persist()
+		//after the log has been added into raft layer, we should send the heartbeat initiative instead of passive
+		//之前的实现里，在Raft.Start() 中没有去直接发起同步，
+		//而是被动等待下一个心跳包。
+		//这样导致在 Raft 上搭建应用后，
+		//对于每一个 client，
+		//一个操作的返回需要的时间至少是一个心跳包（这样才能完成 log 同步）
+		go func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			rf.broadcastHeartbeat()
+		}()
+
 		rf.mu.Unlock()
 	}
 	return index, term, isLeader
