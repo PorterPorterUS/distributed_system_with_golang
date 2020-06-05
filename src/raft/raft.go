@@ -102,6 +102,9 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+
+	//send KV snapshot to KV server layer
+	CommandData []byte
 }
 
 type LogEntry struct {
@@ -140,8 +143,22 @@ type Raft struct {
 
 	//3B
 	snapshotIndex int //3B
-	snapshotTerm  int //3bB
+	snapshotTerm  int //3B
 
+}
+
+//3B
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+//3B
+type InstallSnapshotReply struct {
+	Term int
 }
 
 func (rf *Raft) setCommitIndex(commitIndex int) {
@@ -648,6 +665,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+//lab3b
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("raft.InstallSnapshot.", args, reply)
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -825,4 +848,98 @@ func (rf *Raft) getRelativeLogIndex(index int) int {
 
 func (rf *Raft) getAbsoluteLogIndex(index int) int {
 	return index + rf.snapshotIndex
+}
+
+//leader start to sync snapshot to followers
+func (rf *Raft) syncSnapshotWith(server int) {
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	args := InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.snapshotIndex,
+		LastIncludedTerm:  rf.log[0].Term,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+	rf.mu.Unlock()
+	var reply InstallSnapshotReply
+	if rf.sendInstallSnapshot(server, &args, &reply) {
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.convertTo(Follower)
+			rf.persist()
+		} else {
+			if rf.matchIndex[server] < args.LastIncludedIndex {
+				rf.matchIndex[server] = args.LastIncludedIndex
+			}
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
+		}
+		rf.mu.Unlock()
+
+	}
+
+}
+
+//passive function invoked by RPC
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// 安装快照的过程中暂缓对其他状态的处理
+	if rf.currentTerm > args.Term {
+		//requested one is outdated
+		return
+	}
+	if rf.snapshotIndex >= args.LastIncludedIndex {
+		//duplicate snapshot
+		//sender require a snapshot some entries maybe already snapshot
+		return
+	}
+	if args.Term >= rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.convertTo(Follower)
+	}
+	//// 开始安装快照
+
+	lastIncludedRelativeIndex := rf.getRelativeLogIndex(args.LastIncludedIndex)
+	//if requested snapshot index is inside the follower's log
+	// and also the snapshot index term is equal to the requested term
+	// then truncate the log before snapshotIndex
+	if len(rf.log) > lastIncludedRelativeIndex &&
+		rf.log[lastIncludedRelativeIndex].Term == args.LastIncludedTerm {
+		rf.log = rf.log[lastIncludedRelativeIndex:]
+	} else {
+		// discard the whole log
+		rf.log = []LogEntry{{Term: lastIncludedRelativeIndex, Command: nil}}
+	}
+	//update new snapshotIndex
+	rf.snapshotIndex = args.LastIncludedIndex
+	//update commitIndex and lastAppliedIndex
+	if rf.commitIndex < rf.snapshotIndex {
+		rf.commitIndex = rf.snapshotIndex
+	}
+	if rf.lastApplied < rf.snapshotIndex {
+		rf.lastApplied = rf.snapshotIndex
+	}
+	//save the snapshot
+	rf.persister.SaveStateAndSnapshot(rf.encodeRaftState(), args.Data)
+	//
+	if rf.lastApplied > rf.snapshotIndex {
+		return
+	}
+
+	installSnapshotCommand := ApplyMsg{
+		Command:      "InstallSnapshot",
+		CommandIndex: rf.snapshotIndex,
+		CommandValid: false,
+		CommandData:  rf.persister.ReadSnapshot(),
+	}
+
+	go func(msg ApplyMsg) {
+		rf.applych <- msg
+	}(installSnapshotCommand)
+
 }

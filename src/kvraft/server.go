@@ -68,15 +68,13 @@ func (kv *KVServer) shouldTakeSnapshot() bool {
 	if kv.maxraftstate == -1 {
 		return false
 	}
-
 	if kv.rf.GetRaftStateSize() < kv.maxraftstate {
 		return false
 	}
-
 	return true
 }
 
-func (kv *KVServer) taskSnapShot() {
+func (kv *KVServer) takeSnapShot() {
 	//starting take snapshot
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -116,6 +114,11 @@ func (kv *KVServer) waitingApplying(op Op, timeout time.Duration) bool {
 	if isLeader == false {
 		return true
 	}
+	//check whether need to take snapshot
+	if kv.shouldTakeSnapshot() {
+		kv.takeSnapShot()
+	}
+
 	var wrongLeader bool
 	kv.mu.Lock()
 	//create a channel for each client, and this channel wait until there is notification
@@ -210,6 +213,19 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+func (kv *KVServer) installSnapshot(snapshot []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if snapshot != nil {
+		r := bytes.NewBuffer(snapshot)
+		d := labgob.NewDecoder(r)
+		if d.Decode(&kv.db) != nil || d.Decode(&kv.lastAppliedRequestId) != nil {
+			DPrintf("kvserver %d fails to recover from snapshot", kv.me)
+		}
+	}
+
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -242,6 +258,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	//3B:restart machine and recover from snapshot
+	snapshot := persister.ReadSnapshot()
+	kv.installSnapshot(snapshot)
+
 	// You may need initialization code here.
 	//3A
 	go func() {
@@ -249,6 +269,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		//执行结束后通知对应的等待的 handler。
 		for msg := range kv.applyCh {
 			if msg.CommandValid == false {
+				//3B
+				switch msg.Command.(string) { // use of interface
+				case "InstallSnapshot":
+					kv.installSnapshot(msg.CommandData)
+				}
 				continue
 			}
 			//use of interface
@@ -272,6 +297,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			}
 			//store the requestId that has been performed by server into the mapper
 			kv.lastAppliedRequestId[op.ClientId] = op.RequestId
+			//3B
+			kv.appliedRaftLogIndex = msg.CommandIndex
+
 			//command execution finished, need to make a notification to the listening thread
 			if ch, ok := kv.dispatcher[msg.CommandIndex]; ok {
 				nofify := Notification{
