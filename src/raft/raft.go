@@ -137,6 +137,11 @@ type Raft struct {
 	nextIndex   []int      //领导人维护(non-persistence): 对于每一个服务器，需要发送给他的下一个日志条目的索引值，初始化为当前领导人的最后的日志索引值加1
 	matchIndex  []int      //领导人维护(non-persistence):对于每一个服务器，已经复制给他的日志的最高索引值,initial to 0
 	applych     chan ApplyMsg
+
+	//3B
+	snapshotIndex int //3B
+	snapshotTerm  int //3bB
+
 }
 
 func (rf *Raft) setCommitIndex(commitIndex int) {
@@ -192,25 +197,21 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	//persistence for currentTerm+votedFor+log+snapshotIndex
+	rf.persister.SaveRaftState(rf.encodeRaftState())
 
 }
 
-//
-//func (rf *Raft) encodeRaftState() []byte {
-//	w := new(bytes.Buffer)
-//	e := labgob.NewEncoder(w)
-//	e.Encode(rf.currentTerm)
-//	e.Encode(rf.votedFor)
-//	return w.Bytes()
-//
-//}
+func (rf *Raft) encodeRaftState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	//need to persist:currentTerm,votedFor,Log,snapShotIndex
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.snapshotIndex)
+	e.Encode(rf.log)
+	return w.Bytes()
+}
 
 //
 // restore previously persisted state.
@@ -785,4 +786,43 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func randTimeDuration(lower, upper time.Duration) time.Duration {
 	num := rand.Int63n(upper.Nanoseconds()-lower.Nanoseconds()) + lower.Nanoseconds()
 	return time.Duration(num) * time.Nanosecond
+}
+
+//lab3B-log compaction
+//return the current log size
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) ReplaceLogWithSnapshot(index int, kvSnapshot []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// if the index need to be snapshotted is far behind the current snapshot index
+	if index <= rf.snapshotIndex {
+		return
+	}
+
+	//assign new snapshot index
+	rf.log = rf.log[rf.getRelativeLogIndex(index):]
+	rf.snapshotIndex = index
+
+	//need to persist RaftState(currentTerm+log+snapshotIndex+votedFor)+kvSnapShot(db+lastAppliedRequestId)
+	rf.persister.SaveStateAndSnapshot(rf.encodeRaftState(), kvSnapshot)
+
+	//update
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go rf.syncSnapshotWith(i)
+	}
+
+}
+func (rf *Raft) getRelativeLogIndex(index int) int {
+	return index - rf.snapshotIndex
+}
+
+func (rf *Raft) getAbsoluteLogIndex(index int) int {
+	return index + rf.snapshotIndex
 }

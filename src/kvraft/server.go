@@ -4,6 +4,7 @@ import (
 	"../labgob"
 	"../labrpc"
 	"../raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,40 @@ type KVServer struct {
 	dispatcher map[int]chan Notification
 	//避免同一个Clerk（ClientId）重复操作
 	lastAppliedRequestId map[int64]int
+
+	//3B
+	appliedRaftLogIndex int
+}
+
+func (kv *KVServer) shouldTakeSnapshot() bool {
+	//snapshot if log grows this big
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.maxraftstate == -1 {
+		return false
+	}
+
+	if kv.rf.GetRaftStateSize() < kv.maxraftstate {
+		return false
+	}
+
+	return true
+}
+
+func (kv *KVServer) taskSnapShot() {
+	//starting take snapshot
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	//marshalling=kv.db+kv.lastAppliedRequestId
+	e.Encode(kv.db)
+	e.Encode(kv.lastAppliedRequestId)
+	index := kv.appliedRaftLogIndex
+	//passing the marshalling parameters to buffer.
+	//truncate the log before snapshotIndex
+	kv.rf.ReplaceLogWithSnapshot(index, w.Bytes())
+
 }
 
 //should be called with lock
