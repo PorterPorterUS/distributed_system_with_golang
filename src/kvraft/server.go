@@ -4,11 +4,9 @@ import (
 	"../labgob"
 	"../labrpc"
 	"../raft"
-	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 const Debug = 0
@@ -24,19 +22,6 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	//3A
-	Key   string
-	Value string
-	Name  string
-
-	ClientId  int64
-	RequestId int
-}
-
-// notify the RPC handler that a request from a client has been done
-type Notification struct {
-	ClientId  int64
-	RequestId int
 }
 
 type KVServer struct {
@@ -49,147 +34,14 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	//3A
-	db map[string]string //数据
-	//dispatcher: 解决多个Clerk操作raft（Leader）问题
-	// （根据ClientId和RequsetId判断是否为当前Clerk和本次修改）
-	dispatcher map[int]chan Notification
-	//避免同一个Clerk（ClientId）重复操作
-	lastAppliedRequestId map[int64]int
-
-	//3B
-	appliedRaftLogIndex int
-}
-
-func (kv *KVServer) shouldTakeSnapshot() bool {
-	//snapshot if log grows this big
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if kv.maxraftstate == -1 {
-		return false
-	}
-	if kv.rf.GetRaftStateSize() < kv.maxraftstate {
-		return false
-	}
-	return true
-}
-
-func (kv *KVServer) takeSnapShot() {
-	//starting take snapshot
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	//marshalling=kv.db+kv.lastAppliedRequestId
-	e.Encode(kv.db)
-	e.Encode(kv.lastAppliedRequestId)
-	index := kv.appliedRaftLogIndex
-	//passing the marshalling parameters to buffer.
-	//truncate the log before snapshotIndex
-	kv.rf.ReplaceLogWithSnapshot(index, w.Bytes())
-
-}
-
-//should be called with lock
-//check whether same client has already sent same command with same seq number
-//3A
-func (kv *KVServer) isDuplicatedRequest(clientId int64, requestId int) bool {
-	// Your code here.
-	appliedRequestId, ok := kv.lastAppliedRequestId[clientId]
-	//if cannot find the clientId in the mapper
-	//or can find the clientId but sequential number is larger than the current one
-	if ok == false || appliedRequestId < requestId {
-		return false
-	} else {
-		return true
-	}
-
-}
-
-//3A
-func (kv *KVServer) waitingApplying(op Op, timeout time.Duration) bool {
-	//利用 Start() 来开始在 Raft 中同步一个操作
-	index, _, isLeader := kv.rf.Start(op)
-	// it is a wrong leader
-	if isLeader == false {
-		return true
-	}
-	//check whether need to take snapshot
-	if kv.shouldTakeSnapshot() {
-		kv.takeSnapShot()
-	}
-
-	var wrongLeader bool
-	kv.mu.Lock()
-	//create a channel for each client, and this channel wait until there is notification
-	// inside it, then we can notify the client, the command execution has been finished
-	if _, ok := kv.dispatcher[index]; !ok {
-		kv.dispatcher[index] = make(chan Notification, 1)
-	}
-	ch := kv.dispatcher[index]
-	kv.mu.Unlock()
-
-	select {
-	case notify := <-ch:
-		kv.mu.Lock()
-		delete(kv.dispatcher, index)
-		kv.mu.Unlock()
-		if notify.ClientId != op.ClientId || notify.RequestId != op.RequestId {
-			// leader has changed
-			wrongLeader = true
-		} else {
-			wrongLeader = false
-		}
-
-	case <-time.After(timeout):
-		kv.mu.Lock()
-		if kv.isDuplicatedRequest(op.ClientId, op.RequestId) {
-			wrongLeader = false
-		} else {
-			wrongLeader = true
-		}
-		kv.mu.Unlock()
-
-	}
-	return wrongLeader
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	//3A
-	op := Op{
-		Key:       args.Key,
-		Name:      "Get",
-		ClientId:  args.ClientId,
-		RequestId: args.RequestId,
-	}
-	//wait until there is notification inside the channel
-	reply.WrongLeader = kv.waitingApplying(op, 500*time.Millisecond)
-	//if the leader is right,then  get the value for client
-	if reply.WrongLeader == false {
-		value, ok := kv.db[args.Key]
-		if ok {
-			reply.Value = value
-			return
-		}
-		//cannot find the value
-		reply.Err = ErrNoKey
-	}
-
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	//3A
-	op := Op{
-		Key:       args.Key,
-		Value:     args.Value,
-		Name:      args.Op,
-		ClientId:  args.ClientId,
-		RequestId: args.RequestId,
-	}
-	reply.WrongLeader = kv.waitingApplying(op, 500*time.Millisecond)
-
 }
 
 //
@@ -211,19 +63,6 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
-}
-
-func (kv *KVServer) installSnapshot(snapshot []byte) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if snapshot != nil {
-		r := bytes.NewBuffer(snapshot)
-		d := labgob.NewDecoder(r)
-		if d.Decode(&kv.db) != nil || d.Decode(&kv.lastAppliedRequestId) != nil {
-			DPrintf("kvserver %d fails to recover from snapshot", kv.me)
-		}
-	}
-
 }
 
 //
@@ -250,69 +89,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	//3A
-	kv.db = make(map[string]string)
-	kv.dispatcher = make(map[int]chan Notification)
-	kv.lastAppliedRequestId = make(map[int64]int)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	//3B:restart machine and recover from snapshot
-	snapshot := persister.ReadSnapshot()
-	kv.installSnapshot(snapshot)
-
 	// You may need initialization code here.
-	//3A
-	go func() {
-		//在初始化时开启一个 goroutine 不断读取 applyCh 中的消息，并执行这些消息中的操作。
-		//执行结束后通知对应的等待的 handler。
-		for msg := range kv.applyCh {
-			if msg.CommandValid == false {
-				//3B
-				switch msg.Command.(string) { // use of interface
-				case "InstallSnapshot":
-					kv.installSnapshot(msg.CommandData)
-				}
-				continue
-			}
-			//use of interface
-			//if the msg is a valid command, then proves that raft layer finish his job
-			op := msg.Command.(Op)
-			DPrintf("kvserver %d applied command %s at index %d",
-				kv.me, op.Name, msg.CommandIndex)
-
-			kv.mu.Lock()
-			//check whether the client has processed the same command
-			if kv.isDuplicatedRequest(op.ClientId, op.RequestId) {
-				kv.mu.Unlock()
-				continue
-			}
-			//if it is a new command
-			switch op.Name {
-			case "Put":
-				kv.db[op.Key] = op.Value
-			case "Append":
-				kv.db[op.Key] += op.Value
-			}
-			//store the requestId that has been performed by server into the mapper
-			kv.lastAppliedRequestId[op.ClientId] = op.RequestId
-			//3B
-			kv.appliedRaftLogIndex = msg.CommandIndex
-
-			//command execution finished, need to make a notification to the listening thread
-			if ch, ok := kv.dispatcher[msg.CommandIndex]; ok {
-				nofify := Notification{
-					ClientId:  op.ClientId,
-					RequestId: op.RequestId,
-				}
-				ch <- nofify
-			}
-			kv.mu.Unlock()
-
-		}
-
-	}()
 
 	return kv
 }

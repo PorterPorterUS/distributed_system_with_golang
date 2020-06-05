@@ -16,28 +16,18 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	//3A
-	ClientId  int64
-	RequestId int
 }
 
 type PutAppendReply struct {
 	Err Err
-	//3A
-	WrongLeader bool
 }
 
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
-	//3A
-	ClientId  int64
-	RequestId int
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
-	//3A
-	WrongLeader bool
 }
