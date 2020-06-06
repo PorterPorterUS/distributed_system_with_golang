@@ -17,7 +17,11 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"math/rand"
+	"sync"
+	"time"
+)
 import "sync/atomic"
 import "../labrpc"
 
@@ -32,6 +36,8 @@ const (
 )
 
 type State interface {
+	voteTimeout() // this an interface function, any struct can implement it.
+	currentRole() Role
 }
 
 type BaseState struct {
@@ -39,9 +45,104 @@ type BaseState struct {
 	role Role
 }
 
+func (baseState *BaseState) voteTimeout()      {}
+func (baseState *BaseState) currentRole() Role { return baseState.role }
+func (baseState *BaseState) candidate() {
+	//candidate's job
+	rf := baseState.raft
+	currentTerm := rf.CurrentTerm
+	candidateId := rf.me
+	lastLogIndex := len(rf.Logs) - 1 + rf.SnapshotIndex
+	//when we use slice to get logs,we need -rf.SnapshotIndex
+	lastLogTerm := rf.Logs[lastLogIndex-rf.SnapshotIndex].Term
+
+	go func() {
+		// 一直保持在候选人状态，直到下面三个事情发生：
+		//1. 赢得了大多数选票
+		//2. 其他服务器成为leader
+		//3. 没有任何人获得选举
+		grantedCount := 1
+		for peerIndex := range rf.peers {
+			if peerIndex == rf.me {
+				continue
+			}
+			go func(peer int) { // 逐个发送请求
+				reply := RequestVoteReply{}
+				ok := rf.sendRequestVote(peer, &RequestVoteArgs{
+					Term:         currentTerm,
+					CandidateId:  candidateId,
+					LastLogIndex: lastLogIndex,
+					LastLogTerm:  lastLogTerm,
+				}, &reply)
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if ok {
+					if reply.Term > rf.CurrentTerm {
+						// 发现任期更大的响应，将自己设置为追随者
+						rf.CurrentTerm = reply.Term
+						rf.votedFor = -1 // 取消对自己的投票
+						rf.state = newFollowerState(rf)
+						rf.timerRest <- struct{}{} //reset the timer
+						rf.persist()
+						return
+					}
+					if currentTerm != rf.CurrentTerm {
+						// 收到过期任期的响应，忽略不处理, 或者已经投票完毕
+						return
+					}
+					if reply.VoteGranted { // if the voter vote current candidate
+						grantedCount++
+						//when handle something for reply,need to check the role
+						if grantedCount >= (len(rf.peers)/2+1) && rf.state.currentRole() == Candidate {
+							//become a leader
+							//初始化所有的nextIndex, 初始化为最后一条日志的index加1
+							for i := range rf.peers {
+								//rf.MatchIndex[i] = 0
+								rf.MatchIndex[i] = len(rf.Logs) - 1 + rf.SnapshotIndex
+							}
+							for i := range rf.peers {
+								rf.NextIndex[i] = rf.SnapshotIndex + len(rf.Logs)
+							}
+							// 初始化自己的nextIndex和matchIndex
+							rf.NextIndex[rf.me] = len(rf.Logs) + rf.SnapshotIndex
+							rf.MatchIndex[rf.me] = len(rf.Logs) - 1 + rf.SnapshotIndex
+							// 收到大多数的投票，成为Leader
+							rf.state = newLeaderState(rf)
+							rf.appendRest <- struct{}{} //重置计时器，马上开始发送心跳
+						}
+					}
+				}
+
+			}(peerIndex)
+
+		}
+	}()
+}
+
 type LeaderState struct {
 	//no variable name==> extends father
 	*BaseState
+}
+
+func newLeaderState(rf *Raft) *LeaderState {
+	return &LeaderState{&BaseState{raft: rf, role: Leader}}
+}
+
+type CandidateState struct {
+	//no variable name==> extends father
+	*BaseState
+}
+
+func (state *CandidateState) voteTimeout() {
+	//if candidate timeout, then increment the currentTerm, call candidate()
+	state.raft.mu.Lock()
+	defer state.raft.mu.Unlock()
+	state.raft.CurrentTerm = state.raft.CurrentTerm + 1
+	//starting doing the candidate job
+	state.candidate()
+}
+func newCandidateState(rf *Raft) *CandidateState {
+	return &CandidateState{&BaseState{raft: rf, role: Candidate}}
 }
 
 type FollowerState struct {
@@ -49,9 +150,19 @@ type FollowerState struct {
 	*BaseState
 }
 
-type CandidateState struct {
-	//no variable name==> extends father
-	*BaseState
+func (state *FollowerState) voteTimeout() {
+	//when follower encounter a
+	state.raft.mu.Lock()
+	defer state.raft.mu.Unlock()
+	// 增加自己的任期号
+	state.raft.CurrentTerm = state.raft.CurrentTerm + 1
+	// 为自己投票
+	state.raft.votedFor = state.raft.me
+	//generate a new candidate,state is an interface and right handside must be a pointer
+	state.raft.state = newCandidateState(state.raft)
+	state.candidate()
+	state.raft.persist()
+
 }
 
 //
@@ -94,8 +205,8 @@ type Raft struct {
 	CommitIndex int
 	LastApplied int
 	//volatile on leaders
-	NextIndex  []int
-	MatchIndex []int
+	NextIndex  map[int]int
+	MatchIndex map[int]int
 	//snapshot
 	SnapshotIndex int
 	SnapshotTerm  int
@@ -104,6 +215,10 @@ type Raft struct {
 	//follower,leader,candidate state
 	//struct or interface must be named with capital
 	state State
+
+	//timer
+	timerRest  chan struct{}
+	appendRest chan struct{}
 }
 type LogEntry struct {
 	Term       int
@@ -118,6 +233,34 @@ type LogEntryAppendResult struct {
 //follower extends baseState struct, but still need initial BaseState at first.
 func newFollowerState(rf *Raft) *FollowerState {
 	return &FollowerState{&BaseState{raft: rf, role: Follower}}
+}
+
+func (rf *Raft) voteTimeout() {
+	rf.state.voteTimeout()
+}
+func (rf *Raft) startTimeoutVoteThread() {
+	// a timer daemon for follower and candidate
+	//once timer timeout, then convert to followers
+	//
+	minTimeout := 400
+	maxTimeout := 600
+
+	for {
+		func() {
+			//randomly choose a number between[min,max]
+			timeout := rand.Intn(maxTimeout-minTimeout) + minTimeout
+			timer := time.NewTimer(time.Duration(timeout) * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				// 超时, 将自己设置为候选人, 并开始选举
+				rf.voteTimeout()
+			case <-rf.timerRest:
+				DPrintf("服务器%d重置计时器", rf.me)
+			}
+
+		}()
+	}
 }
 
 // return currentTerm and whether this server
@@ -174,6 +317,11 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int // 候选人的任期号
+	CandidateId  int // 候选人Id
+	LastLogIndex int // 候选人最后日志的索引值
+	LastLogTerm  int // 候选人最后日志的任期号
+
 }
 
 //
@@ -182,6 +330,9 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int  // 当前任期号
+	VoteGranted bool // 是否同意投票
+
 }
 
 //
@@ -289,10 +440,31 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	//left is a state interface, but right side is FollowerState
+	//it will report an error, if state is not an interface
+	rf.state = newFollowerState(rf)
+	//persistence on all servers
+	rf.CurrentTerm = 0
+	rf.votedFor = -1
+	rf.Logs = make([]LogEntry, 1)
+	rf.Logs[0] = LogEntry{Term: 0}
+	//volatile on all servers
+	rf.CommitIndex = 0
+	rf.LastApplied = 0
+	//volatile on leaders
+	rf.MatchIndex = make(map[int]int)
+	rf.NextIndex = make(map[int]int)
+	//snapShot
+	rf.SnapshotIndex = 0
+	rf.SnapshotTerm = 0
 
+	rf.applyChan = applyCh
 	// initialize from state persisted before a crash
 
 	rf.readPersist(persister.ReadRaftState())
+	if rf.SnapshotIndex != 0 {
+		rf.LastApplied = rf.SnapshotIndex
+	}
 
 	return rf
 }
