@@ -1,5 +1,10 @@
 package shardmaster
 
+import (
+	"log"
+	"math/rand"
+)
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -20,11 +25,48 @@ package shardmaster
 // The number of shards.
 const NShards = 10
 
+//Args interface
+type Args interface {
+	clientId() string
+	ticket() string
+}
+type BaseArgs struct {
+	ClientId string
+	Ticket   string
+}
+
+func (baseArgs *BaseArgs) clientId() string {
+	return baseArgs.ClientId
+}
+func (baseArgs *BaseArgs) ticket() string {
+	return baseArgs.Ticket
+}
+
+type Reply interface {
+	markWrongLeader()
+	setCauseErr(err Err)
+}
+type BaseReply struct {
+	WrongLeader bool
+	Err         Err
+}
+
+func (baseReply *BaseReply) markWrongLeader() {
+	baseReply.WrongLeader = true
+}
+func (baseReply *BaseReply) setCauseErr(err Err) {
+	baseReply.Err = err
+}
+
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
 type Config struct {
-	Num    int              // config number
-	Shards [NShards]int     // shard -> gid
+	// config number
+	// 配置文件编号，在整个系统运行过程中递增，每次reconfiguration时递增编号
+	Num int
+	// shard -> gid,mapper[shardId]=groupID
+	Shards [NShards]int
+	//每个repica group集群包括的具体节点
 	Groups map[int][]string // gid -> servers[]
 }
 
@@ -35,39 +77,71 @@ const (
 type Err string
 
 type JoinArgs struct {
+	BaseArgs
 	Servers map[int][]string // new GID -> servers mappings
 }
 
 type JoinReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
+	//WrongLeader bool
+	//Err         Err
 }
 
 type LeaveArgs struct {
+	BaseArgs
 	GIDs []int
 }
 
 type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
+	//WrongLeader bool
+	//Err         Err
 }
 
-type MoveArgs struct {
+type MoveShardArgs struct {
 	Shard int
 	GID   int
 }
 
+type MoveArgs struct {
+	BaseArgs
+	MoveShardArgs
+}
+
 type MoveReply struct {
-	WrongLeader bool
-	Err         Err
+	BaseReply
+	//WrongLeader bool
+	//Err         Err
 }
 
 type QueryArgs struct {
+	BaseArgs
 	Num int // desired config number
 }
 
 type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+	//WrongLeader bool
+	//Err         Err
+	BaseReply
+	Config Config
+}
+
+var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func UUID() string {
+	n := 6
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return string(b)
+}
+
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) {
+	if Debug > 0 {
+		log.Printf("@@@@@@@"+format, a...)
+	}
+	return
 }

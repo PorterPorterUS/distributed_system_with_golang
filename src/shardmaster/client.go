@@ -4,7 +4,9 @@ package shardmaster
 // Shardmaster clerk.
 //
 
-import "../labrpc"
+import (
+	"../labrpc"
+)
 import "time"
 import "crypto/rand"
 import "math/big"
@@ -12,6 +14,8 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	Id     string
+	leader int
 }
 
 func nrand() int64 {
@@ -25,6 +29,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.Id = UUID()
 	return ck
 }
 
