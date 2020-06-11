@@ -25,49 +25,27 @@ import (
 // The number of shards.
 const NShards = 10
 
-//Args interface
-type Args interface {
-	clientId() string
-	ticket() string
-}
-type BaseArgs struct {
-	ClientId string
-	Ticket   string
-}
-
-func (baseArgs *BaseArgs) clientId() string {
-	return baseArgs.ClientId
-}
-func (baseArgs *BaseArgs) ticket() string {
-	return baseArgs.Ticket
-}
-
-type Reply interface {
-	markWrongLeader()
-	setCauseErr(err Err)
-}
-type BaseReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-func (baseReply *BaseReply) markWrongLeader() {
-	baseReply.WrongLeader = true
-}
-func (baseReply *BaseReply) setCauseErr(err Err) {
-	baseReply.Err = err
-}
-
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
 type Config struct {
-	// config number
-	// 配置文件编号，在整个系统运行过程中递增，每次reconfiguration时递增编号
-	Num int
-	// shard -> gid,mapper[shardId]=groupID
-	Shards [NShards]int
-	//每个repica group集群包括的具体节点
+	Num    int              // config number
+	Shards [NShards]int     // shard -> gid
 	Groups map[int][]string // gid -> servers[]
+}
+
+func CopyConfig(srcConfig Config) Config {
+	newConfig := Config{
+		Num:    srcConfig.Num,
+		Shards: srcConfig.Shards,
+		Groups: make(map[int][]string),
+	}
+
+	for key, value := range srcConfig.Groups {
+		newValue := make([]string, len(value))
+		copy(newValue, value)
+		newConfig.Groups[key] = newValue
+	}
+	return newConfig
 }
 
 const (
@@ -76,6 +54,42 @@ const (
 
 type Err string
 
+type Args interface {
+	clientId() string
+	ticket() string
+}
+
+type BaseArgs struct {
+	ClientId string
+	Ticket   string
+}
+
+func (args BaseArgs) clientId() string {
+	return args.ClientId
+}
+
+func (args BaseArgs) ticket() string {
+	return args.Ticket
+}
+
+type Reply interface {
+	markWrongLeader()
+	setCauseErr(err Err)
+}
+
+type BaseReply struct {
+	WrongLeader bool
+	Err         Err
+}
+
+func (r *BaseReply) markWrongLeader() {
+	r.WrongLeader = true
+}
+
+func (r *BaseReply) setCauseErr(err Err) {
+	r.Err = err
+}
+
 type JoinArgs struct {
 	BaseArgs
 	Servers map[int][]string // new GID -> servers mappings
@@ -83,8 +97,6 @@ type JoinArgs struct {
 
 type JoinReply struct {
 	BaseReply
-	//WrongLeader bool
-	//Err         Err
 }
 
 type LeaveArgs struct {
@@ -94,8 +106,6 @@ type LeaveArgs struct {
 
 type LeaveReply struct {
 	BaseReply
-	//WrongLeader bool
-	//Err         Err
 }
 
 type MoveShardArgs struct {
@@ -110,8 +120,6 @@ type MoveArgs struct {
 
 type MoveReply struct {
 	BaseReply
-	//WrongLeader bool
-	//Err         Err
 }
 
 type QueryArgs struct {
@@ -120,8 +128,6 @@ type QueryArgs struct {
 }
 
 type QueryReply struct {
-	//WrongLeader bool
-	//Err         Err
 	BaseReply
 	Config Config
 }
