@@ -1,5 +1,11 @@
 package shardkv
 
+import (
+	"../shardmaster"
+	"log"
+	"math/rand"
+)
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running op-at-a-time paxos.
@@ -8,11 +14,6 @@ package shardkv
 //
 // You will have to modify these definitions.
 //
-import (
-	"../shardmaster"
-	"log"
-	"math/rand"
-)
 
 const (
 	OK            = "OK"
@@ -42,8 +43,8 @@ type PutAppendArgs struct {
 }
 
 type PutAppendReply struct {
-	Err         Err
 	WrongLeader bool
+	Err         Err
 }
 
 type GetArgs struct {
@@ -53,43 +54,33 @@ type GetArgs struct {
 }
 
 type GetReply struct {
+	WrongLeader bool
 	Err         Err
 	Value       string
-	WrongLeader bool
 }
 
-type DeleteShardsArgs struct {
-	//Key string
-	//// You'll have to add definitions here.
-	//BaseArgs
+type DeleteShardArgs struct {
 	Num     int
 	ShardId int // 需要被删除的shard id
 }
 
-type DeleteShardsReply struct {
-	Err Err
-	//Value string
-	WrongLeader bool
-}
-
-type MigrateShardsArgs struct {
-	SourceGid int
-	Num       int
-	ShardsId  []int
-	//Key string
-	//// You'll have to add definitions here.
-	//BaseArgs
-}
-
-type MigrateShardsReply struct {
-	//Err   Err
-	//Value string
-	//Wrongleader bool
+type DeleteShardReply struct {
 	WrongLeader bool
 	Err         Err
+}
+
+type MigrateShardArgs struct {
+	SourceGid int
+	Num       int
+	ShardIds  []int
+}
+
+type MigrateShardReply struct {
+	WrongLeader bool
+	Err         Err
+	Data        [shardmaster.NShards]map[string]string
 	Ack         map[string]string
 	Msg         string
-	Data        [shardmaster.NShards]map[string]string
 }
 
 var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
