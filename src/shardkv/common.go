@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
+	OK            = "OK"
+	ErrNoKey      = "ErrNoKey"
+	ErrWrongGroup = "ErrWrongGroup"
+	ErrTimeout    = "ErrTimeout"
+	ErrExpire     = "ErrExpire"
 )
 
 type Err string
